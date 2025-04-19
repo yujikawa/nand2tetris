@@ -1,0 +1,136 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+ * Parses the binary code in the instruction input and executes it according to the
+ * Hack machine language specification. In the case of a C-instruction, computes the
+ * function specified by the instruction. If the instruction specifies to read a memory
+ * value, the inM input is expected to contain this value. If the instruction specifies
+ * to write a value to the memory, sets the outM output to this value, sets the addressM
+ * output to the target address, and asserts the writeM output (when writeM = 0, any
+ * value may appear in outM).
+ * If the reset input is 0, computes the address of the next instruction and sets the
+ * pc output to that value. If the reset input is 1, sets pc to 0.
+ * Note: The outM and writeM outputs are combinational: they are affected by the
+ * instruction's execution during the current cycle. The addressM and pc outputs are
+ * clocked: although they are affected by the instruction's execution, they commit to
+ * their new values only in the next cycle.
+ */
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+  // A命令かどうか（先頭ビットが0）
+    Not(in=instruction[15], out=isA);
+
+    // C命令かどうか（先頭ビットが1）
+    And(a=instruction[15], b=true, out=isC);
+
+    // Aレジスタ：A命令なら instruction を、C命令かつdest=Aなら aluOut を格納
+    And(a=isC, b=instruction[5], out=loadA);
+    Mux16(a=instruction, b=aluOut, sel=loadA, out=aIn);
+    Or(a=loadA, b=isA, out=actualLoadA);
+    ARegister(in=aIn, load=actualLoadA, out=aOut);
+
+    // Dレジスタ：C命令でdest=Dのときに書き込み
+    And(a=isC, b=instruction[4], out=loadD);
+    DRegister(in=aluOut, load=loadD, out=dOut);
+
+    // Dレジスタの中身を出力へ（デバッグ用）
+    // Or16(a=dOut, b=false, out=DRegister);
+
+    // M（メモリ）：C命令でdest=MのときにwriteMを有効にする
+    And(a=isC, b=instruction[3], out=writeM);
+
+    // ALUのy入力をaビット（instruction[12]）で選ぶ（0ならA、1ならM）
+    Mux16(a=aOut, b=inM, sel=instruction[12], out=aluY);
+
+    // ALU: compフィールド（instruction[11:6]）を制御ビットに渡す
+    ALU(
+        x=dOut,
+        y=aluY,
+        zx=instruction[11],
+        nx=instruction[10],
+        zy=instruction[9],
+        ny=instruction[8],
+        f =instruction[7],
+        no=instruction[6],
+        out=aluOut,
+        zr=zr, ng=ng
+    );
+
+    // 出力用バス
+    Or16(a=aluOut, b=false, out=outM); // outM = ALU出力
+
+    // addressM = aOut（上位1ビットは無視される）
+    And16(a=aOut, b[0..14]=true, b[15]=false, out[0..14]=addressM);
+
+    // ジャンプ判定（jumpフィールド: instruction[2:0]）
+    // 最適化されたジャンプ条件
+    // comp = 0 zr=1 else zr=0
+    // comp < 0 ng=1 else ng=0
+    
+    // JGT: !zr & !ng (jjj=001)
+    // JEQ:  zr & !ng (jjj=010)
+    // JGE:         !ng (jjj=011)
+    // JLT:  ng & !zr (jjj=100)
+    // JNE: !zr       (jjj=101)
+    // JLE:      ng   (jjj=110)
+    // JMP: always    (jjj=111)
+
+    Not(in=zr, out=zrNot);
+    Not(in=ng, out=ngNot);
+
+    // JGT: instruction = 001
+    And(a=zrNot, b=ngNot, out=tmpJGT1);
+    And(a=tmpJGT1, b=instruction[0], out=doJGT);
+
+    // JEQ: instruction = 010
+    And(a=zr, b=ngNot, out=tmpJEQ);
+    And(a=tmpJEQ, b=instruction[1], out=doJEQ);
+
+    // JGE: instruction = 011
+    And(a=instruction[1], b=instruction[0], out=codeJGE);
+    And(a=codeJGE, b=ngNot, out=doJGE);
+
+    // JLT: instruction = 100
+    And(a=zrNot, b=ng, out=tmpJLT);
+    And(a=tmpJLT, b=instruction[2], out=doJLT);
+
+    // JNE: instruction = 101
+    And(a=instruction[2], b=instruction[0], out=codeJNE);
+    And(a=codeJNE, b=zrNot, out=doJNE);
+
+    // JLE: instruction = 110
+    And(a=instruction[2], b=instruction[1], out=codeJLE);
+    And(a=codeJLE, b=ng, out=doJLE);
+
+    // JMP: instruction = 111
+    And(a=instruction[2], b=instruction[1], out=tmp1);
+    And(a=tmp1, b=instruction[0], out=doJMP);
+
+    // すべての doJ?? をまとめる
+    Or(a=doJGT, b=doJEQ, out=or1);
+    Or(a=or1, b=doJGE, out=or2);
+    Or(a=or2, b=doJLT, out=or3);
+    Or(a=or3, b=doJNE, out=or4);
+    Or(a=or4, b=doJLE, out=or5);
+    Or(a=or5, b=doJMP, out=or6);
+    And(a=isC, b=or6, out=doJump);
+
+    // Program Counter（PC）の制御：
+    // reset = 1 → PC = 0、jump = 1 → PC = Aレジスタ、else → PC + 1
+    PC(in=aOut, load=doJump, inc=true, reset=reset, out[0..14]=pc);
+}
